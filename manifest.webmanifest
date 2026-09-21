@@ -1,0 +1,10 @@
+{
+  "name": "臺北市立大學運動能力分析實驗室打卡系統",
+  "short_name": "實驗室打卡",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3f7f9",
+  "theme_color": "#102a43",
+  "lang": "zh-Hant",
+  "icons": [{ "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
