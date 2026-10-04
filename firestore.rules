@@ -9,26 +9,37 @@ service cloud.firestore {
     match /users/{uid} {
       allow create: if self(uid) && request.resource.data.uid == request.auth.uid && request.resource.data.email == request.auth.token.email && request.resource.data.role == 'pending' && request.resource.data.active == false;
       allow read: if self(uid) || admin();
-      allow update: if admin() || (self(uid) && request.resource.data.uid == resource.data.uid && request.resource.data.email == resource.data.email && request.resource.data.role == resource.data.role && request.resource.data.active == resource.data.active);
+      allow update: if admin() || (self(uid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','lastLoginAt']) && request.resource.data.uid == resource.data.uid && request.resource.data.email == resource.data.email && request.resource.data.role == resource.data.role && request.resource.data.active == resource.data.active);
       allow delete: if false;
     }
     match /tags/{id} { allow read: if active(); allow write: if admin(); }
     match /attendance/{id} {
       allow read: if admin() || (active() && resource.data.userId == request.auth.uid);
       allow create: if active() && request.resource.data.userId == request.auth.uid && request.resource.data.checkInAt == request.time && request.resource.data.createdAt == request.time && request.resource.data.updatedAt == request.time;
-      allow update: if active() && resource.data.userId == request.auth.uid && request.resource.data.userId == resource.data.userId && request.resource.data.date == resource.data.date && request.resource.data.checkInAt == resource.data.checkInAt && request.resource.data.createdAt == resource.data.createdAt && request.resource.data.checkOutAt == request.time && request.resource.data.updatedAt == request.time;
+      allow update: if active() && resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['checkOutAt','checkOutTagId','status','updatedAt']) && request.resource.data.checkOutAt == request.time && request.resource.data.updatedAt == request.time && request.resource.data.status == '已簽退';
       allow delete: if false;
     }
     match /requests/{id} {
       allow read: if admin() || (active() && resource.data.userId == request.auth.uid);
       allow create: if active() && request.resource.data.userId == request.auth.uid && request.resource.data.status == '待審核' && request.resource.data.createdAt == request.time;
-      allow update: if admin(); allow delete: if false;
+      allow update: if admin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','reviewNote','reviewedAt','reviewedBy']) && request.resource.data.status in ['已核准','退回'] && request.resource.data.reviewedAt == request.time && request.resource.data.reviewedBy == request.auth.uid;
+      allow delete: if false;
     }
     match /messages/{id} {
       allow read: if admin() || (active() && resource.data.toUid == request.auth.uid);
-      allow create: if admin() && request.resource.data.fromUid == request.auth.uid;
+      allow create: if admin() && request.resource.data.fromUid == request.auth.uid && request.resource.data.createdAt == request.time;
       allow update: if active() && resource.data.toUid == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read','readAt']) && request.resource.data.read == true && request.resource.data.readAt == request.time;
       allow delete: if false;
+    }
+    match /settings/{id} {
+      allow read: if active();
+      allow create, update: if admin() && request.resource.data.keys().hasOnly(['workStart','workEnd','graceMinutes','workDays','holidays','updatedAt','updatedBy']) && request.resource.data.updatedAt == request.time && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if false;
+    }
+    match /auditLogs/{id} {
+      allow read: if admin();
+      allow create: if admin() && request.resource.data.actorId == request.auth.uid && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
     }
     match /{document=**} { allow read, write: if false; }
   }
