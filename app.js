@@ -1,225 +1,53 @@
-const STORAGE_KEY = "utaipei-lab-attendance-v1";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
+import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
+import { getFirestore, collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, query, where, orderBy, limit, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js";
+import { firebaseConfig } from "./firebase-config.js";
 
-const seed = {
-  session: null,
-  attendance: [
-    { id: 1, userId: "u1", name: "王小明", date: "2026-09-21", checkIn: "08:51", checkOut: null, place: "運動能力分析實驗室", status: "準時", source: "NFC" },
-    { id: 2, userId: "u2", name: "陳怡安", date: "2026-09-21", checkIn: "09:08", checkOut: null, place: "運動能力分析實驗室", status: "遲到", source: "NFC" },
-    { id: 3, userId: "u3", name: "林冠宇", date: "2026-09-21", checkIn: null, checkOut: null, place: "校外公務", status: "請假", source: "申請" },
-    { id: 4, userId: "u4", name: "張雅婷", date: "2026-09-21", checkIn: "08:44", checkOut: null, place: "運動能力分析實驗室", status: "準時", source: "NFC" },
-    { id: 5, userId: "u1", name: "王小明", date: "2026-09-20", checkIn: "08:56", checkOut: "18:04", place: "運動能力分析實驗室", status: "準時", source: "NFC" },
-  ],
-  requests: [
-    { id: 1, userId: "u3", name: "林冠宇", type: "公假", date: "2026-09-21", reason: "校外體適能測試支援", status: "已核准" },
-    { id: 2, userId: "u2", name: "陳怡安", type: "補登", date: "2026-09-19", reason: "離開時漏刷簽退", status: "待審核" },
-  ],
-  messages: [
-    { id: 1, to: "u2", from: "admin", title: "今日出勤確認", body: "今天 09:08 完成簽到，想確認早上是否遇到交通或工作安排上的狀況？", time: "今天 09:16", unread: true },
-    { id: 2, to: "u1", from: "admin", title: "系統測試通知", body: "第一版打卡系統正在測試，若遇到無法掃描或紀錄異常，請從補登申請回報。", time: "昨天 16:30", unread: false },
-  ],
-};
+const fb = initializeApp(firebaseConfig), auth = getAuth(fb), db = getFirestore(fb);
+const provider = new GoogleAuthProvider(); provider.setCustomParameters({prompt:"select_account"});
+const root = document.querySelector("#app");
+let user, me, view="dashboard", records=[], requests=[], messages=[], people=[], unsubs=[];
+let pendingTag = new URLSearchParams(location.search).get("tag");
 
-const users = {
-  staff: { id: "u1", name: "王小明", role: "同仁", initials: "王" },
-  admin: { id: "admin", name: "傅老師", role: "系統總管", initials: "傅" },
-};
+const twDate=()=>new Intl.DateTimeFormat("sv-SE",{timeZone:"Asia/Taipei"}).format(new Date());
+const fmt=v=>v?.toDate?new Intl.DateTimeFormat("zh-TW",{dateStyle:"short",timeStyle:"short",timeZone:"Asia/Taipei"}).format(v.toDate()):"—";
+const tm=v=>v?.toDate?new Intl.DateTimeFormat("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Taipei"}).format(v.toDate()):"—";
+const e=v=>String(v??"").replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
+const badge=s=>`<span class="badge ${["啟用","已核准","已簽退"].includes(s)?"good":["待核准","待審核","已簽到"].includes(s)?"warn":"neutral"}">${e(s)}</span>`;
+function toast(s){const x=document.querySelector("#toast");x.textContent=s;x.classList.add("show");setTimeout(()=>x.classList.remove("show"),2400)}
+function loading(s="正在連接安全後臺…"){root.innerHTML=`<main class="loading-page"><div class="loading-card"><div class="spinner"></div><h1>${e(s)}</h1><p>臺北市立大學運動能力分析實驗室</p></div></main>`}
 
-let state = loadState();
-let view = "dashboard";
-const app = document.querySelector("#app");
+function loginPage(note="請使用已登記的個人 Google 帳號登入。登入一次後，日常掃描 NFC Tag 不必再次輸入密碼。"){
+ root.innerHTML=`<main class="login-page"><section class="login-brand"><div class="brand-mark">SPA</div><h1>實驗室<br>智慧出勤</h1><p>以個人帳號、現場 NFC Tag 與雲端時間建立可追溯的出勤紀錄。</p><div class="privacy-note"><span>⌾</span><span>不蒐集手機 IMEI、序號或 MAC，也不持續追蹤位置。</span></div></section><section class="login-panel"><div class="env-chip">正式後臺・Spark 免費方案</div><h2>歡迎使用</h2><p>${e(note)}</p><button class="google-login" id="login"><span class="google-g">G</span><span><strong>使用 Google 帳號登入</strong><small>系統以帳號確認打卡者身分</small></span><span>›</span></button><div class="demo-disclaimer"><strong>首次登入</strong><br>系統會建立待核准帳號；管理者確認身分後才開通打卡。</div></section></main>`;
+ document.querySelector("#login").onclick=async()=>{try{await signInWithPopup(auth,provider)}catch(err){loginPage(err.code==="auth/popup-closed-by-user"?"登入視窗已關閉，尚未登入。":"登入未完成，請稍後再試。")}};
+}
+async function profile(u){const r=doc(db,"users",u.uid),s=await getDoc(r);if(!s.exists()){const p={uid:u.uid,email:u.email,name:u.displayName||u.email,role:"pending",active:false,createdAt:serverTimestamp(),lastLoginAt:serverTimestamp()};await setDoc(r,p);return p}await updateDoc(r,{lastLoginAt:serverTimestamp(),name:u.displayName||s.data().name});return{id:s.id,...s.data()}}
+function pending(){root.innerHTML=`<main class="punch-screen"><section class="punch-card"><div class="success-ring pending-ring">⌛</div><h1>帳號等待核准</h1><p>Google 帳號已確認，管理者尚未開通打卡權限。</p><div class="receipt"><div><span>姓名</span><strong>${e(me.name)}</strong></div><div><span>帳號</span><strong>${e(me.email)}</strong></div><div><span>狀態</span><strong>待管理者核准</strong></div></div><button class="secondary-btn full" onclick="location.reload()">重新檢查</button><button class="link-plain" id="logout">改用其他帳號</button></section></main>`;document.querySelector("#logout").onclick=()=>signOut(auth)}
+function err(){toast("部分雲端資料暫時無法讀取")}
+function watch(){unsubs.forEach(f=>f());unsubs=[];const admin=me.role==="admin";
+ const rq=(name)=>admin?query(collection(db,name),orderBy(name==="attendance"?"date":"createdAt","desc"),limit(200)):query(collection(db,name),where(name==="messages"?"toUid":"userId","==",user.uid),orderBy(name==="attendance"?"date":"createdAt","desc"),limit(100));
+ unsubs.push(onSnapshot(rq("attendance"),s=>{records=s.docs.map(d=>({id:d.id,...d.data()}));if(!pendingTag)render()},err));
+ unsubs.push(onSnapshot(rq("requests"),s=>{requests=s.docs.map(d=>({id:d.id,...d.data()}));if(!pendingTag)render()},err));
+ unsubs.push(onSnapshot(rq("messages"),s=>{messages=s.docs.map(d=>({id:d.id,...d.data()}));if(!pendingTag)render()},err));
+ if(admin)unsubs.push(onSnapshot(query(collection(db,"users"),orderBy("createdAt","desc")),s=>{people=s.docs.map(d=>({id:d.id,...d.data()}));if(!pendingTag)render()},err));
+}
+async function punch(id){loading("正在驗證 NFC Tag 與身分…");try{const ts=await getDoc(doc(db,"tags",id));if(!ts.exists()||!ts.data().active)return punchError("無法驗證這張 Tag","請使用實驗室核發且已啟用的 NFC Tag。");const t=ts.data(),rid=`${user.uid}_${twDate()}`,r=doc(db,"attendance",rid),old=await getDoc(r),field=t.action==="checkin"?"checkInAt":"checkOutAt";if(old.exists()&&old.data()[field])return punchOK(t.action,old.data()[field],t.placeName,true);if(t.action==="checkout"&&!old.exists())return punchError("今天尚未簽到","請先完成簽到，再掃描簽退 Tag。");if(t.action==="checkin")await setDoc(r,{userId:user.uid,name:me.name,date:twDate(),checkInAt:serverTimestamp(),checkOutAt:null,checkInTagId:id,checkOutTagId:null,placeId:t.placeId,placeName:t.placeName,status:"已簽到",source:"NFC",createdAt:serverTimestamp(),updatedAt:serverTimestamp()});else await updateDoc(r,{checkOutAt:serverTimestamp(),checkOutTagId:id,status:"已簽退",updatedAt:serverTimestamp()});const fresh=await getDoc(r);punchOK(t.action,fresh.data()[field],t.placeName,false)}catch(x){console.error(x);punchError("打卡未完成","網路或權限驗證失敗，系統沒有建立紀錄。")}}
+function punchOK(a,t,p,dupe){const n=a==="checkin"?"簽到":"簽退";root.innerHTML=`<main class="punch-screen"><section class="punch-card"><div class="success-ring">✓</div><h1>${dupe?`已完成${n}`:`${n}成功`}</h1><p>${dupe?"既有紀錄已確認，沒有重複新增。":"雲端系統已接收，您可以放心離開。"}</p><div class="receipt"><div><span>人員</span><strong>${e(me.name)}</strong></div><div><span>時間</span><strong>${e(fmt(t))}</strong></div><div><span>地點</span><strong>${e(p)}</strong></div><div><span>驗證</span><strong>帳號與 NFC Tag 已通過</strong></div></div><button class="primary-btn full" id="home">查看我的紀錄</button></section></main>`;if(navigator.vibrate)navigator.vibrate([80,40,80]);document.querySelector("#home").onclick=home}
+function punchError(a,b){root.innerHTML=`<main class="punch-screen"><section class="punch-card"><div class="success-ring error-ring">!</div><h1>${e(a)}</h1><p>${e(b)}</p><button class="secondary-btn full" id="home">返回系統</button></section></main>`;document.querySelector("#home").onclick=home}
+function home(){pendingTag=null;history.replaceState({},"",location.pathname);render()}
 
-function loadState() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    return saved ? { ...seed, ...saved } : structuredClone(seed);
-  } catch { return structuredClone(seed); }
-}
-function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-function currentUser() { return state.session ? users[state.session] : null; }
-function today() { return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Taipei" }).format(new Date()); }
-function timeNow() { return new Intl.DateTimeFormat("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Taipei" }).format(new Date()); }
-function dateLabel() { return new Intl.DateTimeFormat("zh-TW", { dateStyle: "full", timeZone: "Asia/Taipei" }).format(new Date()); }
-function toast(message) {
-  const el = document.querySelector("#toast");
-  el.textContent = message; el.classList.add("show");
-  setTimeout(() => el.classList.remove("show"), 2400);
-}
-function statusBadge(status) {
-  const kind = ["準時", "已核准"].includes(status) ? "good" : ["遲到", "待審核"].includes(status) ? "warn" : status === "異常" ? "bad" : "neutral";
-  return `<span class="badge ${kind}">${status}</span>`;
-}
+const nav=()=>me.role==="admin"?[["dashboard","⌂","總覽"],["attendance","◫","出勤紀錄"],["exceptions","!","異常與申請"],["messages","✉","訊息中心"],["people","♙","人員與 Tag"]]:[["dashboard","⌂","我的首頁"],["attendance","◫","打卡紀錄"],["requests","＋","請假／補登"],["messages","✉","訊息"]];
+function render(){if(!me?.active||!["staff","admin"].includes(me.role))return pending();const n=nav(),title=n.find(x=>x[0]===view)?.[2];root.innerHTML=`<div class="shell"><aside class="sidebar"><div class="side-brand"><div class="brand-mark">SPA</div><div><strong>運動能力分析<br>實驗室</strong><small>智慧出勤系統</small></div></div><nav class="nav">${n.map(x=>`<button data-view="${x[0]}" class="${view===x[0]?"active":""}"><span class="icon">${x[1]}</span>${x[2]}</button>`).join("")}</nav><div class="side-bottom"><div class="user-mini"><span class="avatar sm">${e(me.name[0])}</span><div><strong>${e(me.name)}</strong><small>${me.role==="admin"?"系統總管":"同仁"}</small></div></div><button class="logout" id="logout">登出</button></div></aside><main class="main"><header class="topbar"><div><h1>${e(title)}</h1><p>臺北市立大學運動能力分析實驗室</p></div><div class="top-actions"><span class="chip hide-mobile">正式雲端後臺</span><span class="chip">${e(me.name)}</span></div></header><div class="content">${page()}</div></main><nav class="mobile-bar">${n.slice(0,4).map(x=>`<button data-view="${x[0]}" class="${view===x[0]?"active":""}"><span>${x[1]}</span>${x[2]}</button>`).join("")}</nav></div>`;bind()}
+function page(){if(view==="dashboard")return me.role==="admin"?adminDash():staffDash();if(view==="attendance")return `<div class="page-title"><div><h2>${me.role==="admin"?"全體":"我的"}出勤紀錄</h2><p>手機時間不作為正式時間。</p></div><button class="secondary-btn" id="export">匯出 CSV</button></div><div class="card">${table(records)}</div>`;if(view==="requests")return requestPage();if(view==="exceptions")return exceptionPage();if(view==="messages")return messagePage();if(view==="people")return peoplePage();return""}
+const stat=(a,b,c,d)=>`<div class="stat"><div class="stat-top"><span>${e(a)}</span><span class="stat-icon">${c}</span></div><strong>${e(b)}</strong><small>${e(d)}</small></div>`;
+function adminDash(){const r=records.filter(x=>x.date===twDate()),p=people.filter(x=>!x.active).length;return `<section class="hero-card"><div><h2>今日出勤概況</h2><p>雲端紀錄會即時同步。</p></div><div class="clock"><strong>${new Date().toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit"})}</strong><small>${twDate()}</small></div></section><section class="stats">${stat("已簽到",r.length,"✓","今日紀錄")}${stat("已簽退",r.filter(x=>x.checkOutAt).length,"◷","今日完成")}${stat("待審申請",requests.filter(x=>x.status==="待審核").length,"!","需要處理")}${stat("待核准帳號",p,"♙","確認身分")}</section><div class="card"><div class="card-head"><h3>今日人員狀況</h3></div>${table(r)}</div>`}
+function staffDash(){const r=records.find(x=>x.date===twDate());return `<section class="hero-card"><div><h2>${r?.checkInAt?"今天已完成簽到":"今天尚未簽到"}</h2><p>${r?.checkInAt?`${e(r.placeName)}・${tm(r.checkInAt)}`:"請至指定工作地點掃描 NFC Tag。"}</p></div><div class="clock"><strong>${new Date().toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit"})}</strong><small>${twDate()}</small></div></section><section class="stats">${stat("本月紀錄",records.filter(x=>x.date?.startsWith(twDate().slice(0,7))).length,"✓","已同步")}${stat("今日簽到",tm(r?.checkInAt),"◷","雲端時間")}${stat("今日簽退",tm(r?.checkOutAt),"↗","雲端時間")}${stat("未讀訊息",messages.filter(x=>!x.read).length,"✉","管理者訊息")}</section><div class="card"><div class="card-head"><h3>最近打卡紀錄</h3></div>${table(records.slice(0,5))}</div>`}
+function table(rows){return rows.length?`<div class="table-wrap"><table><thead><tr><th>人員</th><th>日期</th><th>簽到</th><th>簽退</th><th>地點</th><th>狀態</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${e(r.name)}</td><td>${e(r.date)}</td><td>${tm(r.checkInAt)}</td><td>${tm(r.checkOutAt)}</td><td>${e(r.placeName)}</td><td>${badge(r.status)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">目前沒有紀錄</div>`}
+function requestPage(){return `<div class="page-title"><div><h2>請假與補登</h2><p>原始紀錄不直接修改。</p></div></div><div class="grid-2"><div class="card"><div class="card-head"><h3>提出新申請</h3></div><form class="card-body" id="req"><div class="form-grid"><div class="field"><label>類型</label><select name="type"><option>補登</option><option>請假</option><option>公出</option><option>紀錄更正</option></select></div><div class="field"><label>日期</label><input name="date" type="date" required value="${twDate()}"></div></div><div class="field field-gap"><label>原因</label><textarea name="reason" required maxlength="500"></textarea></div><div class="form-actions"><button class="primary-btn">送出</button></div></form></div><div class="card"><div class="card-head"><h3>申請紀錄</h3></div><div class="card-body">${requests.map(x=>`<div class="message"><div class="message-head"><strong>${e(x.type)}・${e(x.date)}</strong>${badge(x.status)}</div><p>${e(x.reason)}</p></div>`).join("")||'<div class="empty">尚無申請</div>'}</div></div></div>`}
+function exceptionPage(){return `<div class="page-title"><div><h2>異常與申請</h2><p>先聯繫、再確認。</p></div></div><div class="card"><div class="table-wrap"><table><thead><tr><th>人員</th><th>事項</th><th>日期</th><th>說明</th><th>狀態</th><th>處理</th></tr></thead><tbody>${requests.map(x=>`<tr><td>${e(x.name)}</td><td>${e(x.type)}</td><td>${e(x.date)}</td><td>${e(x.reason)}</td><td>${badge(x.status)}</td><td>${x.status==="待審核"?`<button class="link-btn review" data-id="${x.id}" data-status="已核准">核准</button> <button class="link-btn review" data-id="${x.id}" data-status="退回">退回</button>`:"—"}</td></tr>`).join("")}</tbody></table></div></div>`}
+function messagePage(){return `<div class="page-title"><div><h2>訊息中心</h2><p>出勤提醒與關懷紀錄。</p></div></div><div class="card"><div class="card-body">${messages.map(x=>`<article class="message ${x.read?"":"unread"}"><div class="message-head"><strong>${e(x.title)}</strong><time>${fmt(x.createdAt)}</time></div><p>${e(x.body)}</p>${me.role!=="admin"&&!x.read?`<button class="link-btn read" data-id="${x.id}">標記已讀</button>`:""}</article>`).join("")||'<div class="empty">目前沒有訊息</div>'}</div></div>`}
+function peoplePage(){return `<div class="page-title"><div><h2>人員與 Tag</h2><p>確認 Google 帳號後開通權限。</p></div></div><div class="grid-2"><div class="card"><div class="table-wrap"><table><thead><tr><th>姓名／帳號</th><th>角色</th><th>狀態</th><th>操作</th></tr></thead><tbody>${people.map(p=>`<tr><td><strong>${e(p.name)}</strong><br><small>${e(p.email)}</small></td><td>${p.role==="admin"?"系統總管":p.role==="staff"?"同仁":"待核准"}</td><td>${badge(p.active?"啟用":"待核准")}</td><td>${p.id===user.uid?"目前帳號":`<button class="link-btn toggle" data-id="${p.id}" data-on="${!p.active}">${p.active?"停用":"核准為同仁"}</button>`}</td></tr>`).join("")}</tbody></table></div></div><div class="card"><div class="card-head"><h3>打卡位置</h3></div><div class="card-body"><p>運動能力分析實驗室</p><p>簽到 Tag：lab-checkin<br>簽退 Tag：lab-checkout</p><p class="fine-print">固定網址可能被轉傳，不能單獨視為絕對位置證明。</p></div></div></div>`}
+function bind(){document.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{view=b.dataset.view;render()});document.querySelector("#logout").onclick=()=>signOut(auth);document.querySelector("#export")?.addEventListener("click",exportCsv);document.querySelector("#req")?.addEventListener("submit",async ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);await addDoc(collection(db,"requests"),{userId:user.uid,name:me.name,type:f.get("type"),date:f.get("date"),reason:f.get("reason"),status:"待審核",createdAt:serverTimestamp()});toast("申請已送出")});document.querySelectorAll(".read").forEach(b=>b.onclick=()=>updateDoc(doc(db,"messages",b.dataset.id),{read:true,readAt:serverTimestamp()}));document.querySelectorAll(".review").forEach(b=>b.onclick=()=>updateDoc(doc(db,"requests",b.dataset.id),{status:b.dataset.status,reviewedAt:serverTimestamp(),reviewedBy:user.uid}));document.querySelectorAll(".toggle").forEach(b=>b.onclick=()=>updateDoc(doc(db,"users",b.dataset.id),{active:b.dataset.on==="true",role:b.dataset.on==="true"?"staff":"pending",approvedAt:serverTimestamp(),approvedBy:user.uid}))}
+function exportCsv(){const rs=[["人員","日期","簽到","簽退","地點","狀態"],...records.map(r=>[r.name,r.date,tm(r.checkInAt),tm(r.checkOutAt),r.placeName,r.status])],csv="\ufeff"+rs.map(r=>r.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\n"),a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download=`出勤紀錄_${twDate()}.csv`;a.click();URL.revokeObjectURL(a.href)}
 
-function checkTagEntry() {
-  const params = new URLSearchParams(location.search);
-  const tag = params.get("tag");
-  if (!tag) return false;
-  if (!state.session) { sessionStorage.setItem("pendingTag", tag); renderLogin("請先完成身分驗證，系統將接續處理現場打卡。"); return true; }
-  processPunch(tag); return true;
-}
-
-function processPunch(tag) {
-  const user = currentUser();
-  if (!user || user.id === "admin") { renderPunchError("總管帳號不能建立個人出勤紀錄。", "請切換為同仁帳號後重新掃描。"); return; }
-  const map = {
-    "lab-checkin": { type: "簽到", field: "checkIn", place: "運動能力分析實驗室" },
-    "lab-checkout": { type: "簽退", field: "checkOut", place: "運動能力分析實驗室" },
-  };
-  const config = map[tag];
-  if (!config) { renderPunchError("無法驗證這張 Tag", "請使用實驗室核發的 NFC Tag，或聯絡系統總管。"); return; }
-  let record = state.attendance.find(r => r.userId === user.id && r.date === today());
-  if (!record) {
-    record = { id: Date.now(), userId: user.id, name: user.name, date: today(), checkIn: null, checkOut: null, place: config.place, status: "準時", source: "NFC" };
-    state.attendance.unshift(record);
-  }
-  const duplicate = Boolean(record[config.field]);
-  if (!duplicate) record[config.field] = timeNow();
-  saveState();
-  renderPunchSuccess(config.type, record[config.field], config.place, duplicate);
-}
-
-function renderPunchSuccess(type, time, place, duplicate) {
-  app.innerHTML = `<main class="punch-screen"><section class="punch-card">
-    <div class="success-ring">✓</div>
-    <h1>${duplicate ? `已完成${type}` : `${type}成功`}</h1>
-    <p>${duplicate ? "本次掃描未重複新增紀錄。" : "紀錄已由系統接收，您可以放心離開。"}</p>
-    <div class="receipt">
-      <div><span>人員</span><strong>${currentUser().name}</strong></div>
-      <div><span>時間</span><strong>${today()} ${time}</strong></div>
-      <div><span>地點</span><strong>${place}</strong></div>
-      <div><span>驗證</span><strong>示範 Tag 已通過</strong></div>
-    </div>
-    <div class="security-note">目前為第一版測試環境。正式上線時將以安全型動態 Tag、一次性驗證碼及伺服器時間取代示範參數。</div>
-    <button class="primary-btn" style="width:100%;margin-top:18px" data-action="home">查看我的紀錄</button>
-  </section></main>`;
-  document.querySelector('[data-action="home"]').onclick = () => { history.replaceState({}, "", location.pathname); view = "dashboard"; renderApp(); };
-  if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
-}
-function renderPunchError(title, message) {
-  app.innerHTML = `<main class="punch-screen"><section class="punch-card"><div class="success-ring" style="background:var(--red-soft);color:var(--red)">!</div><h1>${title}</h1><p>${message}</p><button class="secondary-btn" style="width:100%;margin-top:16px" onclick="location.href=location.pathname">返回系統</button></section></main>`;
-}
-
-function renderLogin(note = "使用個人帳號登入；日常掃描 Tag 後不必再次輸入密碼。") {
-  app.innerHTML = `<main class="login-page">
-    <section class="login-brand">
-      <div class="brand-mark">SPA</div>
-      <h1>實驗室<br>智慧出勤</h1>
-      <p>臺北市立大學運動能力分析實驗室，以個人裝置與現場 NFC Tag 建立快速、可追溯的出勤紀錄。</p>
-      <div class="privacy-note"><span>⌾</span><span>僅在打卡當下驗證必要資訊，不進行持續位置追蹤。</span></div>
-    </section>
-    <section class="login-panel">
-      <h2>歡迎使用</h2><p>${note}</p>
-      <div class="demo-actions">
-        <button class="login-option" data-login="staff"><span class="avatar">王</span><span><strong>同仁示範入口</strong><small>打卡紀錄、申請與訊息</small></span><span class="login-arrow">›</span></button>
-        <button class="login-option" data-login="admin"><span class="avatar">傅</span><span><strong>系統總管示範入口</strong><small>今日出勤、異常與人員管理</small></span><span class="login-arrow">›</span></button>
-      </div>
-      <div class="demo-disclaimer"><strong>第一版安全說明</strong><br>目前公開測試僅使用瀏覽器內的示範資料，不包含真實人事資料。正式帳號、權限與多人同步將接入受保護的免費後端後才啟用。</div>
-    </section>
-  </main>`;
-  document.querySelectorAll("[data-login]").forEach(btn => btn.onclick = () => {
-    state.session = btn.dataset.login; saveState();
-    const pending = sessionStorage.getItem("pendingTag");
-    if (pending) { sessionStorage.removeItem("pendingTag"); processPunch(pending); }
-    else renderApp();
-  });
-}
-
-function navItems(role) {
-  return role === "系統總管"
-    ? [["dashboard","⌂","總覽"],["attendance","◫","出勤紀錄"],["exceptions","!","異常與申請"],["messages","✉","訊息中心"],["people","♙","人員與 Tag"]]
-    : [["dashboard","⌂","我的首頁"],["attendance","◫","打卡紀錄"],["requests","＋","請假／補登"],["messages","✉","訊息"]];
-}
-
-function renderApp() {
-  const user = currentUser();
-  if (!user) { renderLogin(); return; }
-  const nav = navItems(user.role);
-  const title = nav.find(n => n[0] === view)?.[2] || "總覽";
-  app.innerHTML = `<div class="shell">
-    <aside class="sidebar">
-      <div class="side-brand"><div class="brand-mark">SPA</div><div><strong>運動能力分析<br>實驗室</strong><small>智慧出勤系統</small></div></div>
-      <nav class="nav">${nav.map(n => `<button data-view="${n[0]}" class="${view===n[0]?"active":""}"><span class="icon">${n[1]}</span>${n[2]}</button>`).join("")}</nav>
-      <div class="side-bottom"><div class="user-mini"><span class="avatar sm">${user.initials}</span><div><strong>${user.name}</strong><small>${user.role}</small></div></div><button class="logout" data-action="logout">登出示範帳號</button></div>
-    </aside>
-    <main class="main"><header class="topbar"><div><h1>${title}</h1><p>臺北市立大學運動能力分析實驗室</p></div><div class="top-actions"><span class="chip hide-mobile">測試環境</span><span class="chip">${user.name}</span></div></header><div class="content">${renderView(user)}</div></main>
-    <nav class="mobile-bar">${nav.slice(0,4).map(n => `<button data-view="${n[0]}" class="${view===n[0]?"active":""}"><span>${n[1]}</span>${n[2]}</button>`).join("")}</nav>
-  </div>`;
-  bindEvents();
-}
-
-function renderView(user) {
-  if (view === "dashboard") return user.role === "系統總管" ? adminDashboard() : staffDashboard(user);
-  if (view === "attendance") return attendancePage(user);
-  if (view === "requests") return requestsPage(user);
-  if (view === "exceptions") return exceptionsPage();
-  if (view === "messages") return messagesPage(user);
-  if (view === "people") return peoplePage();
-  return "";
-}
-
-function adminDashboard() {
-  const todayRows = state.attendance.filter(r => r.date === "2026-09-21");
-  return `<section class="hero-card"><div><h2>今日出勤概況</h2><p>目前有 4 位排定人員，1 件事項需要確認。</p></div><div class="clock"><strong id="clock">${timeNow()}</strong><small>${dateLabel()}</small></div></section>
-  <section class="stats">
-    ${stat("已簽到","3 / 4","✓","75% 已完成")}${stat("準時","2","◷","今日準時")}${stat("遲到","1","!","等待確認")}${stat("請假／公出","1","↗","已核准")}
-  </section>
-  <section class="grid-2"><div class="card"><div class="card-head"><div><h3>今日人員狀況</h3><p>最後更新：剛剛</p></div><button class="link-btn" data-go="attendance">查看全部</button></div>${attendanceTable(todayRows)}</div>
-  <div class="card"><div class="card-head"><div><h3>需要處理</h3><p>異常與待辦事項</p></div></div><div class="card-body"><div class="timeline">
-    <div class="timeline-item"><span class="timeline-dot" style="background:var(--amber)"></span><div><strong>陳怡安今日遲到</strong><p>09:08 完成 NFC 簽到，可傳送訊息確認。</p></div></div>
-    <div class="timeline-item"><span class="timeline-dot"></span><div><strong>1 件補登申請</strong><p>陳怡安申請補登 09/19 簽退紀錄。</p></div></div>
-    <div class="timeline-item"><span class="timeline-dot" style="background:var(--green)"></span><div><strong>林冠宇公假已核准</strong><p>今日前往校外進行體適能測試。</p></div></div>
-  </div></div></div></section>`;
-}
-
-function staffDashboard(user) {
-  const record = state.attendance.find(r => r.userId === user.id && r.date === today()) || state.attendance.find(r => r.userId === user.id);
-  return `<section class="hero-card"><div><h2>${record?.checkIn ? "今天已完成簽到" : "今天尚未簽到"}</h2><p>${record?.checkIn ? `${record.place}・${record.checkIn}` : "請至指定工作地點掃描 NFC Tag。"}</p></div><div class="clock"><strong id="clock">${timeNow()}</strong><small>${dateLabel()}</small></div></section>
-  <section class="stats">${stat("本月出勤","18 天","✓","目前紀錄")}${stat("準時率","94%","◷","17 次準時")}${stat("異常紀錄","0","!","無待處理")}${stat("未讀訊息",String(state.messages.filter(m=>m.to===user.id&&m.unread).length),"✉","管理者訊息")}</section>
-  <section class="grid-2"><div class="card"><div class="card-head"><div><h3>最近打卡紀錄</h3><p>所有時間均以伺服器為準</p></div><button class="link-btn" data-go="attendance">查看全部</button></div>${attendanceTable(state.attendance.filter(r=>r.userId===user.id).slice(0,5))}</div>
-  <div class="card"><div class="card-head"><div><h3>快速測試 NFC 流程</h3><p>模擬現場兩張 Tag</p></div></div><div class="card-body"><p style="color:var(--muted);line-height:1.6;margin-top:0">正式版需掃描實體安全 Tag。此處只供第一版流程驗收。</p><div style="display:grid;gap:10px"><a class="primary-btn" style="text-align:center;text-decoration:none" href="?tag=lab-checkin">模擬掃描「簽到」Tag</a><a class="secondary-btn" style="text-align:center;text-decoration:none" href="?tag=lab-checkout">模擬掃描「簽退」Tag</a></div></div></div></section>`;
-}
-
-function stat(label, value, icon, note) { return `<div class="stat"><div class="stat-top"><span>${label}</span><span class="stat-icon">${icon}</span></div><strong>${value}</strong><small>${note}</small></div>`; }
-function attendanceTable(rows) {
-  if (!rows.length) return `<div class="empty">目前沒有紀錄</div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>人員</th><th>日期</th><th>簽到</th><th>簽退</th><th>地點</th><th>狀態</th></tr></thead><tbody>${rows.map(r=>`<tr><td><div class="person"><span class="avatar sm">${r.name[0]}</span><div><strong>${r.name}</strong><small>${r.source}</small></div></div></td><td>${r.date}</td><td>${r.checkIn||"—"}</td><td>${r.checkOut||"—"}</td><td>${r.place}</td><td>${statusBadge(r.status)}</td></tr>`).join("")}</tbody></table></div>`;
-}
-function attendancePage(user) {
-  const rows = user.role === "系統總管" ? state.attendance : state.attendance.filter(r=>r.userId===user.id);
-  return `<div class="page-title"><div><h2>${user.role === "系統總管" ? "全體出勤紀錄" : "我的打卡紀錄"}</h2><p>依人員、日期與狀態查閱已接收的紀錄。</p></div><div class="toolbar"><button class="secondary-btn" data-action="export">匯出 CSV</button></div></div><div class="card">${attendanceTable(rows)}</div>`;
-}
-function requestsPage(user) {
-  const rows = state.requests.filter(r=>r.userId===user.id);
-  return `<div class="page-title"><div><h2>請假與補登</h2><p>原始打卡紀錄不直接修改，申請與核准過程會完整保留。</p></div></div>
-  <div class="grid-2"><div class="card"><div class="card-head"><h3>提出新申請</h3></div><form class="card-body" id="request-form"><div class="form-grid"><div class="field"><label>申請類型</label><select name="type"><option>補登</option><option>請假</option><option>公出</option><option>紀錄更正</option></select></div><div class="field"><label>日期</label><input name="date" type="date" required value="${today()}"></div></div><div class="field" style="margin-top:16px"><label>原因說明</label><textarea name="reason" required placeholder="請簡要說明情況"></textarea></div><div class="form-actions"><button class="primary-btn">送出申請</button></div></form></div>
-  <div class="card"><div class="card-head"><h3>申請紀錄</h3></div><div class="card-body"><div class="message-list">${rows.length?rows.map(r=>`<div class="message"><div class="message-head"><strong>${r.type}・${r.date}</strong>${statusBadge(r.status)}</div><p>${r.reason}</p></div>`).join(""):'<div class="empty">尚無申請</div>'}</div></div></div></div>`;
-}
-function exceptionsPage() {
-  return `<div class="page-title"><div><h2>異常與申請</h2><p>先聯繫、再確認；系統標記不等於直接判定違規。</p></div></div><div class="card"><div class="table-wrap"><table><thead><tr><th>人員</th><th>事項</th><th>日期</th><th>說明</th><th>狀態</th><th>處理</th></tr></thead><tbody>${state.requests.map(r=>`<tr><td>${r.name}</td><td>${r.type}</td><td>${r.date}</td><td>${r.reason}</td><td>${statusBadge(r.status)}</td><td><button class="link-btn" data-message="${r.name}">傳訊關心</button></td></tr>`).join("")}</tbody></table></div></div>`;
-}
-function messagesPage(user) {
-  const msgs = user.role === "系統總管" ? state.messages : state.messages.filter(m=>m.to===user.id);
-  return `<div class="page-title"><div><h2>訊息中心</h2><p>將出勤事件與溝通留在同一筆可追溯紀錄中。</p></div>${user.role === "系統總管"?'<button class="primary-btn" data-action="compose">新增訊息</button>':''}</div><div class="card"><div class="card-body"><div class="message-list">${msgs.map(m=>`<article class="message ${m.unread?"unread":""}"><div class="message-head"><strong>${m.title}</strong><time>${m.time}</time></div><p>${m.body}</p><div style="margin-top:12px"><button class="link-btn" data-action="read" data-id="${m.id}">${m.unread?"標記已讀":"回覆"}</button></div></article>`).join("")}</div></div></div>`;
-}
-function peoplePage() {
-  return `<div class="page-title"><div><h2>人員與 Tag</h2><p>管理身分、角色及指定打卡位置。</p></div><button class="primary-btn" data-action="not-ready">新增人員</button></div><div class="grid-2"><div class="card"><div class="card-head"><h3>人員清單</h3></div><div class="table-wrap"><table><thead><tr><th>姓名</th><th>角色</th><th>裝置</th><th>狀態</th></tr></thead><tbody>${["王小明","陳怡安","林冠宇","張雅婷"].map((n,i)=>`<tr><td><div class="person"><span class="avatar sm">${n[0]}</span><strong>${n}</strong></div></td><td>研究助理</td><td>${i<2?"已驗證":"待綁定"}</td><td>${statusBadge("啟用")}</td></tr>`).join("")}</tbody></table></div></div><div class="card"><div class="card-head"><h3>打卡位置</h3></div><div class="card-body"><div class="message"><div class="message-head"><strong>運動能力分析實驗室</strong>${statusBadge("測試中")}</div><p>簽到 Tag：lab-checkin<br>簽退 Tag：lab-checkout<br>正式版將改用安全動態驗證。</p></div></div></div></div>`;
-}
-
-function bindEvents() {
-  document.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{view=b.dataset.view;renderApp();});
-  document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{view=b.dataset.go;renderApp();});
-  document.querySelector('[data-action="logout"]')?.addEventListener("click",()=>{state.session=null;saveState();renderLogin();});
-  document.querySelector('[data-action="export"]')?.addEventListener("click",exportCsv);
-  document.querySelectorAll('[data-action="not-ready"], [data-action="compose"]').forEach(b=>b.onclick=()=>toast("此功能將在正式帳號後端接入後啟用。"));
-  document.querySelectorAll('[data-message]').forEach(b=>b.onclick=()=>{view="messages";renderApp();toast(`已開啟 ${b.dataset.message} 的訊息管道`);});
-  document.querySelectorAll('[data-action="read"]').forEach(b=>b.onclick=()=>{const m=state.messages.find(x=>x.id===Number(b.dataset.id));if(m){m.unread=false;saveState();renderApp();}});
-  document.querySelector("#request-form")?.addEventListener("submit", e=>{e.preventDefault();const f=new FormData(e.currentTarget);state.requests.unshift({id:Date.now(),userId:currentUser().id,name:currentUser().name,type:f.get("type"),date:f.get("date"),reason:f.get("reason"),status:"待審核"});saveState();renderApp();toast("申請已送出");});
-  const clock = document.querySelector("#clock"); if(clock) setTimeout(()=>{if(document.querySelector("#clock")) document.querySelector("#clock").textContent=timeNow();},30000);
-}
-function exportCsv() {
-  const rows = [["人員","日期","簽到","簽退","地點","狀態"],...state.attendance.map(r=>[r.name,r.date,r.checkIn||"",r.checkOut||"",r.place,r.status])];
-  const csv = "\ufeff"+rows.map(row=>row.map(v=>`"${String(v).replaceAll('"','""')}"`).join(",")).join("\n");
-  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="出勤紀錄.csv";a.click();URL.revokeObjectURL(a.href);toast("CSV 已匯出");
-}
-
-if ("serviceWorker" in navigator) window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));
-if (!checkTagEntry()) state.session ? renderApp() : renderLogin();
+loading();onAuthStateChanged(auth,async u=>{unsubs.forEach(f=>f());user=u;if(!u)return loginPage(pendingTag?"請先完成身分驗證，登入後系統會接續處理現場打卡。":undefined);loading("正在確認帳號權限…");try{me=await profile(u);if(!me.active||!["staff","admin"].includes(me.role))return pending();watch();pendingTag?punch(pendingTag):render()}catch(x){console.error(x);punchError("後臺連線失敗","Firebase 尚未完成設定，或目前網路無法連線。")}});
